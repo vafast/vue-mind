@@ -495,6 +495,178 @@ function VideoPlayer({ src, autoplay, onPlay, volume, onVolumeChange }: Props) {
 | 接入成本 | 中 | 中 | 高（每站一套） | **低（两行代码）** |
 | 性能 | 中（跨进程） | 低（每步 LLM） | 高 | **高（同进程直调）** |
 
+## AI 时代的登录问题
+
+### 问题：认证链路是断裂的
+
+这是 AI Agent 操作 Web 应用最大的基础设施缺口。
+
+```
+人类 ──→ 浏览器（Cookie/Session）──→ 网站 ──→ 正常使用     ✓
+AI   ──→ 注入 JS / HTTP 请求    ──→ 网站 ──→ 你谁？请登录   ✗
+```
+
+讽刺的是：**用户在自己电脑上已经登录了所有服务**。Safari 里有 B 站的 Cookie，Chrome 里有腾讯的 Session，Keychain 里存着所有密码。但 AI Agent 却用不了这些——它被当作一个"陌生访客"。
+
+### 实际遇到的问题
+
+我们在构建视频网站 AI 工具时踩了个遍：
+
+| 场景 | 问题 |
+|---|---|
+| B 站画质 | 未登录只能 480p，登录后 1080p，大会员 4K |
+| 腾讯视频 | 未登录无法播放会员内容，VIP 等级决定画质上限 |
+| 会员检测 | B 站靠 Cookie `SESSDATA`，腾讯靠 `vqq_vusession`，完全不同的字段和逻辑 |
+| Session 过期 | Cookie 随时可能失效，AI 操作到一半突然变成未登录状态 |
+| 登录流程 | 每个网站登录 UI 不同（扫码/密码/手机号/OAuth），AI 很难自动完成 |
+
+### 三层解法
+
+#### 第一层：复用浏览器已有登录态（立即可用）
+
+最务实的方案：用户已经在浏览器里登录了，AI 直接借用。
+
+```
+用户的 Safari/Chrome
+    │
+    ▼
+Cookie 提取 ──→ AI Agent 带着 Cookie 发请求
+    │
+    ├── Safari: ~/Library/Cookies/Cookies.binarycookies
+    ├── Chrome: ~/Library/Application Support/Google/Chrome/Default/Cookies (SQLite + 加密)
+    └── macOS Keychain: security find-internet-password
+```
+
+现有工具：
+- **@mherod/get-cookie** — Node.js 库，从 Chrome/Firefox/Safari 的数据库直接提取 Cookie，自动处理加密
+- **Electron `session.cookies`** — Electron 应用可直接访问自己的 Cookie Store
+- **AgentAuth** — 开源 AI Agent 认证库，加密存储 Cookie，按需分发给 Agent
+
+**我们在 B 站和腾讯视频工具中已经用了这种方式**：通过 Safari 的 `runJavaScript` 在已登录的页面上下文中执行操作，自动继承用户的 Cookie。
+
+适用场景：自己电脑上的 AI 助手，用户知道且授权 AI 使用自己的登录态。
+
+#### 第二层：标准化的 Agent 授权协议（正在成熟）
+
+IETF 和社区正在建立 AI Agent 专用的认证标准：
+
+**AAP（Agent Authorization Profile）— IETF 2026 年 2 月草案**
+
+扩展 OAuth 2.0，为 AI Agent 设计了结构化 JWT Claims：
+
+```json
+{
+  "agent_id": "vue-mind-agent-001",
+  "agent_type": "llm",
+  "operator": "user@example.com",
+  "capabilities": {
+    "actions": ["read:video", "control:playback"],
+    "constraints": {
+      "domains": ["bilibili.com", "v.qq.com"],
+      "rate_limit": "100/hour",
+      "time_window": "2026-02-15T00:00:00Z/2026-02-16T00:00:00Z"
+    }
+  },
+  "task_id": "watch-swallowed-star-latest",
+  "purpose": "播放吞噬星空最新一集",
+  "oversight": "human-in-the-loop"
+}
+```
+
+核心特性：
+- **Agent 身份标识** — AI 有自己的 ID 和类型（LLM/bot/scripted）
+- **能力约束** — 精确到域名、操作、频率限制，不是模糊的 `read:web`
+- **任务绑定** — Token 和具体任务关联，防止"目的漂移"
+- **委托追踪** — 多层 Agent 链路中，每一层的授权都可追溯
+- **人类监督** — 可声明需要 human-in-the-loop
+
+**MCP Auth — 基于 OAuth 2.1**
+
+Model Context Protocol 已经定义了认证规范：
+- 服务端返回 `401` + Protected Resource Metadata
+- 客户端走 OAuth 2.1 授权码流程
+- 支持 Authorization Code（代表用户）和 Client Credentials（应用级）
+
+**Transaction Tokens for Agents — IETF 草案**
+
+为多 Agent 协作设计的令牌传递方案：
+- `actor` 字段标识当前 Agent
+- `principal` 字段标识最终授权人（人类用户）
+- 在 Agent 链路中逐层传递，每层可审计
+
+#### 第三层：框架原生认证感知（vue-mind 方向）
+
+这是我们要做的：**让组件声明自己的认证需求，AI 自动感知**。
+
+```vue
+<script setup>
+import { defineAIAction } from '@vue-mind/runtime'
+
+defineAIAction('playVideo', {
+  description: '播放视频',
+  // 声明这个 action 需要的认证级别
+  auth: {
+    required: true,
+    level: 'vip',           // 需要会员
+    provider: 'tencent',    // 腾讯账号体系
+    fallback: '未登录只能播放 480p 预览',
+  },
+  async handler(params) { ... },
+})
+</script>
+```
+
+AI 在调用前就知道：
+- 这个操作需要登录
+- 需要什么级别的权限
+- 没权限会怎样
+- 应该怎么引导用户
+
+**页面快照中包含认证状态**：
+
+```javascript
+__AI_MIND__.snapshot()
+// {
+//   auth: {
+//     logged: true,
+//     provider: 'tencent',
+//     level: 'vip',
+//     expiresAt: '2026-03-01T00:00:00Z',
+//   },
+//   components: [
+//     {
+//       name: 'VideoPlayer',
+//       actions: [{
+//         name: 'playVideo',
+//         auth: { required: true, level: 'vip', satisfied: true }
+//       }, {
+//         name: 'play4K',
+//         auth: { required: true, level: 'svip', satisfied: false }
+//       }]
+//     }
+//   ]
+// }
+```
+
+AI 看到快照就知道：当前是 VIP 登录态，可以播放高清，但 4K 需要 SVIP 升级。
+
+### 最佳实践建议
+
+| 场景 | 推荐方案 |
+|---|---|
+| **个人电脑 AI 助手** | 第一层：复用浏览器 Cookie，零额外登录 |
+| **AI SaaS 代理操作** | 第二层：AAP / MCP Auth，标准化授权 |
+| **AI-native 应用开发** | 第三层：框架内声明 auth，AI 感知 + 自动引导 |
+| **多 Agent 协作** | Transaction Tokens，链路可追溯 |
+
+### 关键原则
+
+> **AI 不应该需要自己"登录"。在用户的设备上，AI 是用户的代理，应该继承用户的信任和权限。**
+
+这和人使用电脑是一致的：你不会因为打开了一个新的 Tab 就需要重新登录。AI 作为用户的延伸，也不应该。
+
+---
+
 ## Roadmap
 
 - [x] 编译时 SFC AST 元数据提取
@@ -502,6 +674,8 @@ function VideoPlayer({ src, autoplay, onPlay, volume, onVolumeChange }: Props) {
 - [x] AIChannel 双向异步通信
 - [x] defineAIAction 一次定义自动生成 Tool
 - [x] WebMCP 桥接
+- [ ] Auth 认证感知 — 组件声明认证需求，快照包含登录状态
+- [ ] Browser Auth Bridge — 从 Safari/Chrome 提取复用 Cookie
 - [ ] 状态机建模 — 描述页面状态转换（idle → loading → playing → paused）
 - [ ] Vue Router 全量路由图谱提取
 - [ ] Pinia Store 自动追踪（state/getters/actions）

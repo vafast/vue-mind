@@ -419,6 +419,68 @@ __AI_MIND__.getTools().map(t => t.function.name)
 - **tsup** — 插件构建
 - **W3C WebMCP** — 浏览器标准集成
 
+## 为什么选 Vue，不选 React
+
+这不是偏好问题，是技术结构决定的。**Vue 的 SFC 格式天然就是 AI 可分析的"能力声明"，React 的 JSX 不是。**
+
+### 对比：同一个组件
+
+**Vue — 结构化、声明式、可静态分析**：
+
+```vue
+<script setup lang="ts">
+defineProps<{ src: string; autoplay?: boolean }>()   // ← 输入声明
+defineEmits<{ play: []; pause: [] }>()                // ← 事件声明
+const volume = defineModel<number>('volume')          // ← 双向绑定声明
+const playing = ref(false)                            // ← 状态声明
+function seek(seconds: number) { ... }                // ← 动作声明
+defineExpose({ seek })                                // ← 暴露声明
+</script>
+<template>
+  <button @click="togglePlay">播放</button>           <!-- 交互声明 -->
+  <router-link to="/home">首页</router-link>           <!-- 导航声明 -->
+</template>
+```
+
+每一行都是明确的**能力声明**，编译器可以直接提取。
+
+**React — 灵活、命令式、无法静态分析**：
+
+```tsx
+function VideoPlayer({ src, autoplay, onPlay, volume, onVolumeChange }: Props) {
+  const [playing, setPlaying] = useState(false)        // 解构赋值，变量名可以是任何东西
+  const seek = useCallback((s: number) => { ... }, []) // 是性能优化，不是语义声明
+  useImperativeHandle(ref, () => ({ seek }))           // 不常用，大多数组件不写
+  return <button onClick={() => { ... }}>播放</button>  // handler 是匿名函数，内联逻辑
+}
+```
+
+### 7 个技术原因
+
+| # | Vue 的优势 | React 的困难 |
+|---|---|---|
+| 1 | **`defineProps` / `defineEmits` / `defineModel` 是编译器宏**，专为静态分析设计，编译时就能提取完整类型 | props 只是函数参数，没有专用声明宏，需要从 TypeScript 类型或 PropTypes 反向推断 |
+| 2 | **`<template>` 是受限的 HTML 超集**，`@click`、`v-if`、`v-for` 都是结构化指令，AST 可完整遍历 | JSX 是任意 JavaScript 表达式，`onClick={fn}` 里的 `fn` 可能是内联函数、三元表达式、高阶函数返回值，无法静态分析 |
+| 3 | **`@vue/compiler-sfc` 官方编译器**已经能解析 SFC 并提取 props/emits 类型信息，vue-mind 直接复用 | React 没有等价的官方工具。Babel 可以做 JSX transform，但不理解组件语义 |
+| 4 | **`ref()` / `computed()` / `reactive()` 是显式状态声明**，名称和类型编译时可知 | `useState` 返回数组解构 `const [x, setX] = useState(0)`，变量名只是约定，不是强制结构 |
+| 5 | **`defineExpose` 明确标记对外暴露的方法** | `useImperativeHandle` 使用率低，大多数组件不写，AI 不知道哪些方法可以从外部调用 |
+| 6 | **SFC 三段分离**（template/script/style），每段可独立解析，互不干扰 | JSX 把渲染逻辑、事件处理、状态管理混在一个函数里，没有清晰的分离边界 |
+| 7 | **Vite 是 Vue 的原生构建工具**，plugin transform hook 在编译时拦截 `.vue` 文件，注入成本为零 | React 用 webpack/Vite/Turbopack 都行，但没有统一的 SFC 编译入口，需要 Babel 插件 + 自定义 loader |
+
+### React 能做吗？
+
+能，但更难。路线图中的 "React 适配" 需要：
+
+1. **Babel 插件**分析 JSX AST + hooks 调用模式，启发式提取 props/state/actions
+2. **自定义 hook `useAIMind()`** 替代编译时提取（运行时补充元数据，开发者需要多写代码）
+3. **TypeScript Compiler API** 从类型声明反向推断 props 结构（比 Vue 的编译器宏重得多）
+
+总结：Vue 是 AI 分析最友好的前端框架，因为它的设计哲学就是**声明式 + 编译器驱动**。React 的哲学是**"just JavaScript"**，灵活但对静态分析不友好。
+
+> vue-mind 选 Vue 不是因为 Vue 更好，而是因为 Vue 的设计恰好和 AI 需要的结构化信息高度契合。
+
+---
+
 ## 对比：vue-mind vs 现有方案
 
 | 维度 | Playwright / Puppeteer | Stagehand | 手写 Tool | **vue-mind** |

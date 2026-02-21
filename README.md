@@ -880,6 +880,1324 @@ AI 友好：★★★★★
 
 **一句话**：用 Passkeys 让人登录，用 OAuth 2.1 管 Token，用能力模型控权限，用委托令牌授权 AI，用 Channel 确认敏感操作。
 
+### AI 凭证管理器（AI Credential Manager）
+
+上面解决了"应用侧怎么设计认证"，但还有一个更实际的问题：**AI 怎么管理跨网站、跨账号、跨设备的凭证？**
+
+本质上需要一个 **"1Password for AI"**——统一保险箱 + 每站独立凭证 + 智能匹配 + 健康监控 + 跨设备同步。
+
+#### 社区现有方案
+
+| 项目 | 核心思路 | 协议 |
+|---|---|---|
+| [Keychains.dev](https://keychains.dev/) | SSH 密钥身份 + 服务端凭证注入，AI 永远不接触原始密码 | 商业 |
+| [AgentVault](https://secureagenttools.github.io/AgentVault/) | 开源多 Agent 凭证管理，含注册发现 + KeyManager | Apache 2.0 |
+| [Authed Identity](https://github.com/authed-dev/authed-identity) | Agent-to-Agent 加密身份认证协议，消除静态凭证 | MIT |
+| [Agent Identity Management](https://github.com/opena2a-org/agent-identity-management) | 非人类身份（NHI）平台，加密身份 + 治理 + 访问控制 | Apache 2.0 |
+
+#### 问题一：AI 怎么知道在哪个网站用什么登录？
+
+三层发现机制，逐级降级：
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Layer 1: 标准自动发现（最优）                         │
+│  GET /.well-known/oauth-authorization-server         │
+│  → 返回支持的 auth 方法、端点、scope 等                │
+│  → Google、GitHub、Microsoft 等已支持                 │
+│  → 基于 RFC 8414 OAuth 2.0 Authorization Metadata    │
+├─────────────────────────────────────────────────────┤
+│  Layer 2: 社区注册表（兜底）                           │
+│  → 类似 browserslist / caniuse 的社区维护数据库         │
+│  → 覆盖不支持标准发现的网站（B站、腾讯视频、抖音等）      │
+│  → 格式：{ host, authMethod, fields, refreshStrategy } │
+├─────────────────────────────────────────────────────┤
+│  Layer 3: AI 自学习（补充）                            │
+│  → 首次访问未知网站时，AI 分析登录页 DOM 结构            │
+│  → 识别表单字段、OAuth 按钮、二维码等                   │
+│  → 记录并缓存到本地注册表供下次使用                      │
+└─────────────────────────────────────────────────────┘
+```
+
+社区注册表数据格式示例：
+
+```jsonc
+{
+  "bilibili.com": {
+    "authMethod": "cookie-session",
+    "credentials": ["SESSDATA", "bili_jct", "DedeUserID"],
+    "loginUrl": "https://passport.bilibili.com/login",
+    "sessionCheck": "https://api.bilibili.com/x/web-interface/nav",
+    "sessionCheckField": "data.isLogin",
+    "refreshStrategy": "browser-relogin" // Cookie 过期只能重新浏览器登录
+  },
+  "github.com": {
+    "authMethod": "oauth2",
+    "discovery": "https://github.com/.well-known/oauth-authorization-server",
+    "alternativeAuth": ["personal-access-token"],
+    "tokenRefresh": true
+  }
+}
+```
+
+#### 问题二：统一认证还是独立？
+
+**统一保险箱 + 每站独立凭证**。和密码管理器完全一样的架构：
+
+```
+主密钥（生物识别 / Passkey / 主密码）
+    │
+    ▼ 解锁
+┌─────────────────────────────────┐
+│  加密凭证保险箱                    │
+│  ├── bilibili: {SESSDATA, ...}  │
+│  ├── github: {PAT: ghp_xxx}    │
+│  ├── gmail: {refresh_token}     │
+│  ├── npm: {automation_token}    │
+│  └── ...                        │
+└─────────────────────────────────┘
+```
+
+不可能做到"一个凭证走天下"——每个网站的认证系统完全不同。但可以做到 **"一个入口管所有凭证"**。AI 只需要有保险箱的访问权，保险箱负责按网站匹配和注入凭证。
+
+推荐底层存储方案：
+
+| 方案 | 优势 | 劣势 |
+|---|---|---|
+| **OS Keychain**（macOS Keychain / Windows Credential Manager） | 原生加密，生物识别解锁，零额外依赖 | 跨平台不统一 |
+| **Bitwarden API** | 开源可自建，API 完善，跨平台 | 需要额外部署 |
+| **加密 JSON 文件** | 最简单，可版本控制 | 安全性依赖加密实现 |
+
+#### 问题三：多账号怎么办？
+
+**Profile（上下文配置）机制**——类似 Chrome 多用户 / Git 条件配置：
+
+```
+AI Credential Manager
+├── Profile: "个人"
+│   ├── github: personal account (ghp_aaa)
+│   ├── bilibili: 个人号 (SESSDATA_xxx)
+│   └── gmail: personal@gmail.com (refresh_token_a)
+│
+├── Profile: "工作"
+│   ├── github: work org account (ghp_bbb)
+│   ├── npm: @company scope (npm_token_yyy)
+│   └── gmail: me@company.com (refresh_token_b)
+│
+└── Profile: "副业"
+    ├── github: side-project account (ghp_ccc)
+    └── ...
+```
+
+AI 在执行任务时智能匹配上下文：
+
+```
+"帮我推送 vue-mind 代码" 
+  → 检测 repo remote: github.com/vafast/vue-mind
+  → 匹配到 "工作" Profile 的 GitHub 凭证
+  → 自动使用 ghp_bbb
+
+"帮我看看 B 站收藏" 
+  → bilibili.com 只在 "个人" Profile 有凭证
+  → 自动使用个人号
+
+"帮我推送到 github.com/xxx/yyy"
+  → 多个 Profile 都有 GitHub 凭证
+  → 无法确定 → 询问用户："你想用哪个 GitHub 账号？"
+```
+
+匹配规则优先级：
+
+```
+1. 任务上下文精确匹配（repo owner / org 对应的 Profile）
+2. 域名唯一匹配（该域名只有一个 Profile 有凭证）
+3. 默认 Profile（用户设置的默认上下文）
+4. 交互询问（以上都匹配不了时，问用户）
+```
+
+#### 问题四：改了密码怎么办？
+
+**健康监控 + 自动刷新 + 优雅降级**：
+
+```
+┌──────────────┐    正常     ┌──────────────┐
+│  凭证正常      │ ─────────→ │  正常使用      │
+│  (healthy)    │            │              │
+└──────┬───────┘            └──────────────┘
+       │
+       │ 请求返回 401/403
+       │ 或 Token 即将过期
+       ▼
+┌──────────────┐   可刷新    ┌──────────────┐
+│  检测到异常    │ ─────────→ │  自动刷新      │ ──→ 恢复正常
+│              │            │  (OAuth)      │
+└──────┬───────┘            └──────────────┘
+       │
+       │ 不可自动恢复（Cookie 过期 / 密码已改 / Token 吊销）
+       ▼
+┌──────────────┐   通知用户   ┌──────────────┐
+│  标记为失效    │ ─────────→ │  请求重新认证   │
+│  (expired)   │            │  "你的 B 站    │
+└──────────────┘            │   登录已过期"   │
+                            └──────┬───────┘
+                                   │ 用户在浏览器重新登录
+                                   ▼
+                            ┌──────────────┐
+                            │  提取新凭证    │ ──→ 更新保险箱 → 恢复
+                            │  更新存储      │
+                            └──────────────┘
+```
+
+按凭证类型的处理策略：
+
+| 凭证类型 | 密码修改影响 | 恢复方式 |
+|---|---|---|
+| **OAuth refresh_token** | 密码改了 token 不一定失效（取决于服务商） | 自动 refresh；失败则重新授权 |
+| **Personal Access Token** | 密码改了 PAT 不受影响 | 只有主动吊销才失效 |
+| **Cookie Session** | 改密码通常导致所有 Session 失效 | 必须用户重新浏览器登录 |
+| **API Key** | 通常不受密码影响 | 只有主动轮换才失效 |
+| **Automation Token** | 同 API Key | 同上 |
+
+健康检测机制：
+
+```javascript
+// 凭证管理器的健康检查循环
+async function healthCheck(credential) {
+  const result = await credential.sessionCheck() // 调各站的验证接口
+
+  if (result.status === 'valid') {
+    credential.lastChecked = Date.now()
+    return
+  }
+
+  if (result.status === 'expiring' && credential.canRefresh) {
+    await credential.refresh() // OAuth 自动刷新
+    return
+  }
+
+  // 不可恢复 → 标记失效，通知用户
+  credential.status = 'expired'
+  notifyUser(`${credential.service} 的登录已过期，请重新登录`)
+}
+```
+
+#### 问题五：多设备怎么同步？（Mac / Windows / 手机）
+
+这是最复杂的问题。核心原则：**分层同步——可同步的同步，不该同步的不同步**。
+
+```
+┌─────────────────────────────────────────────────────┐
+│                 可以跨设备同步                         │
+│  ├── OAuth refresh_token  ← 有时效，泄露风险可控       │
+│  ├── API Key / PAT        ← 可限 scope，可随时吊销     │
+│  ├── Automation Token     ← 同上                      │
+│  └── Service Registry     ← 非敏感的网站认证方式映射     │
+├─────────────────────────────────────────────────────┤
+│                 不应该跨设备同步                        │
+│  ├── Cookie Session       ← 绑定设备/IP指纹，同步无意义 │
+│  ├── WebAuthn Passkey     ← OS 原生同步（iCloud/Google）│
+│  └── 主解锁密钥           ← 每设备独立，生物识别不可传输  │
+└─────────────────────────────────────────────────────┘
+```
+
+三种同步方案对比：
+
+**方案 A：依赖 OS 原生同步（推荐 Apple 用户）**
+
+```
+Mac ──── iCloud Keychain ──── iPhone
+              │
+              └── Passkeys 自动同步
+              └── 凭证存在 Keychain，iCloud 加密同步
+              └── Windows 无法参与
+```
+
+- 优势：零额外工具，端到端加密，生物识别解锁
+- 劣势：生态锁定，Windows/Android 无法加入
+
+**方案 B：密码管理器 API 同步（推荐跨平台用户）**
+
+```
+Mac ────┐
+        │
+Windows ├──── Bitwarden / 1Password ──── 加密同步
+        │         (自建或云端)
+手机  ───┘
+```
+
+```javascript
+// AI Credential Manager 集成 Bitwarden 示例
+const credential = await bitwarden.getItem({
+  service: 'github.com',
+  profile: 'work',
+})
+// Bitwarden 在所有设备同步，AI 各设备拿到的凭证一致
+```
+
+- 优势：真正跨平台，一处修改全设备同步
+- 劣势：依赖第三方（可自建 Vaultwarden）
+
+**方案 C：自建加密同步（推荐极客/企业）**
+
+```
+各设备 ──→ 加密凭证文件 ──→ Git / S3 / WebDAV ──→ 各设备拉取
+                                                    │
+                                  每台设备用本地主密钥解密
+```
+
+- 优势：完全自主可控
+- 劣势：需要自己实现加密、冲突解决、同步逻辑
+
+**推荐组合方案：**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  同步层选择（按场景）                                       │
+│                                                          │
+│  Apple 全家桶用户 → macOS Keychain + iCloud               │
+│  跨平台用户      → Bitwarden API（自建 Vaultwarden 可选）  │
+│  企业用户        → HashiCorp Vault + 企业 SSO              │
+│                                                          │
+│  所有方案共同点：                                           │
+│  ├── Passkey 由 OS 原生同步（不需要管）                     │
+│  ├── Cookie 不同步（每设备各自浏览器登录）                   │
+│  ├── Token 类凭证通过上述方案同步                           │
+│  └── 每台设备各自的 AI Agent 共享同一个凭证库                │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### 完整架构总览
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    AI Credential Manager                     │
+│                  （AI 凭证管理器 — 完整架构）                   │
+├──────────────┬──────────────┬───────────────┬───────────────┤
+│ Service      │ Credential   │ Health        │ Sync          │
+│ Registry     │ Store        │ Monitor       │ Layer         │
+│ 网站认证注册表 │ 加密凭证保险箱 │ 健康监控       │ 跨设备同步     │
+├──────────────┼──────────────┼───────────────┼───────────────┤
+│ RFC 8414     │ OS Keychain  │ 定期心跳       │ iCloud        │
+│ 自动发现      │ 或 Bitwarden │ Token 自刷新   │ Keychain      │
+│              │              │               │               │
+│ 社区注册表    │ Profile 多   │ 401 检测       │ Bitwarden     │
+│ (caniuse式)  │ 账号隔离      │ 自动标记失效    │ API 同步      │
+│              │              │               │               │
+│ AI 自学习    │ 加密存储      │ 通知用户       │ 或自建        │
+│ DOM 分析     │ 生物识别解锁  │ 重新认证       │ 加密同步      │
+├──────────────┴──────────────┴───────────────┴───────────────┤
+│                      Profile Matcher                        │
+│               （上下文智能匹配 — 自动选账号）                   │
+│  task context → repo/domain/org → profile → credential      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**一句话总结**：统一保险箱存独立凭证，Profile 隔离多账号，三层发现识别网站认证方式，健康监控自动续期和报警，Token 可跨设备同步但 Cookie 不同步。
+
+### 自有应用认证选型：落地方案
+
+上面讨论了理想架构，这里给出 **"今天就开始写代码"** 的具体选型和实现路径。
+
+#### 推荐技术栈
+
+```
+┌───────────────────────────────────────────────────────────┐
+│                        自有应用完整 Auth 技术栈              │
+├───────────────────────────────────────────────────────────┤
+│                                                           │
+│  前端：Vue 3 + vue-mind                                    │
+│  后端：Node.js（Hono / Express / Nitro 均可）               │
+│  认证库：Better Auth  ← 核心选择                             │
+│  Passkey：Better Auth Passkey Plugin（内置 SimpleWebAuthn）  │
+│  数据库：PostgreSQL / SQLite（Better Auth 直接对接）          │
+│  AI 委托：自定义 Better Auth Plugin                          │
+│                                                           │
+└───────────────────────────────────────────────────────────┘
+```
+
+#### 为什么选 Better Auth？
+
+对比主流方案：
+
+| 方案 | 自主可控 | AI 友好 | Vue 支持 | Passkey | 复杂度 | 推荐度 |
+|---|---|---|---|---|---|---|
+| **Better Auth** | ★★★★★ 完全自有 | ★★★★★ 可自定义 | ★★★★★ 原生 | ★★★★★ 插件 | ★★★☆☆ | **首选** |
+| Logto OSS | ★★★★★ 自建 | ★★★★☆ | ★★★☆☆ | ★★★★☆ | ★★☆☆☆ 需运维 | 企业级备选 |
+| Supabase Auth | ★★★☆☆ 绑平台 | ★★★☆☆ | ★★★☆☆ | ★★★☆☆ | ★★★★★ 简单 | 快速原型 |
+| Clerk | ★★☆☆☆ SaaS | ★★☆☆☆ | ★★★☆☆ | ★★★★☆ | ★★★★★ | 不推荐自有 |
+| Auth.js | ★★★★☆ | ★★☆☆☆ | ★★☆☆☆ Next 为主 | ★★★☆☆ | ★★★☆☆ | Vue 不适合 |
+| 自己撸 | ★★★★★ | ★★★★★ | ★★★★★ | ★★☆☆☆ 工作量大 | ★☆☆☆☆ | 不推荐 |
+
+Better Auth 的核心优势：
+
+1. **TypeScript-first**：类型推断到 Session、User、自定义字段，不需要 `as`
+2. **Vue 原生客户端**：`better-auth/vue` 提供 `useSession()` 等响应式 API
+3. **Passkey 开箱即用**：`@better-auth/passkey` 插件，底层是 SimpleWebAuthn
+4. **插件系统**：可以写自定义插件实现 AI 委托令牌、能力模型，不需要 fork
+5. **数据库直连**：不需要额外的 auth 服务器，直接连你的 PostgreSQL/SQLite
+6. **零平台绑定**：数据完全在你手里，随时可迁移
+
+#### 实现路径：分三步
+
+**第一步：基础认证（1-2 天）**
+
+安装和配置 Better Auth，实现人类登录：
+
+```bash
+# 安装
+pnpm add better-auth @better-auth/passkey
+```
+
+服务端配置：
+
+```typescript
+// server/auth.ts
+import { betterAuth } from 'better-auth'
+import { passkey } from '@better-auth/passkey'
+import Database from 'better-sqlite3'
+
+export const auth = betterAuth({
+  database: new Database('./app.db'),
+
+  // 邮箱密码（兜底，但不推荐主力）
+  emailAndPassword: { enabled: true },
+
+  // Passkey（推荐主力登录方式）
+  plugins: [
+    passkey({
+      rpID: 'yourdomain.com',
+      rpName: 'Your App',
+      origin: 'https://yourdomain.com',
+    }),
+  ],
+})
+```
+
+Vue 客户端：
+
+```typescript
+// src/lib/auth-client.ts
+import { createAuthClient } from 'better-auth/vue'
+import { passkeyClient } from '@better-auth/passkey/client'
+
+export const authClient = createAuthClient({
+  plugins: [passkeyClient()],
+})
+```
+
+在 Vue 组件中使用：
+
+```vue
+<script setup lang="ts">
+import { authClient } from '@/lib/auth-client'
+
+const session = authClient.useSession()
+
+// 注册 Passkey（按指纹）
+function registerPasskey() {
+  authClient.passkey.register({ name: 'My MacBook' })
+}
+
+// Passkey 登录（按指纹）
+function loginWithPasskey() {
+  authClient.passkey.authenticate()
+}
+</script>
+```
+
+此时你的应用已经支持：Passkey 按指纹登录 + 邮箱密码兜底 + Session 管理。
+
+**第二步：AI 委托层（1-2 天）**
+
+写一个 Better Auth 自定义插件，实现 AI delegation token：
+
+```typescript
+// server/plugins/ai-delegation.ts
+import { createAuthEndpoint } from 'better-auth/api'
+import type { BetterAuthPlugin } from 'better-auth'
+import { z } from 'zod'
+
+/**
+ * AI 委托令牌插件
+ * 已登录用户可以给 AI 颁发受限 token
+ */
+export function aiDelegation(): BetterAuthPlugin {
+  return {
+    id: 'ai-delegation',
+
+    // 扩展数据库：存储委托令牌
+    schema: {
+      delegationToken: {
+        fields: {
+          userId: { type: 'string', required: true, references: { model: 'user', field: 'id' } },
+          agentId: { type: 'string', required: true },
+          capabilities: { type: 'string', required: true }, // JSON 能力列表
+          expiresAt: { type: 'date', required: true },
+          revoked: { type: 'boolean', defaultValue: false },
+        },
+      },
+    },
+
+    endpoints: {
+      // 颁发委托令牌（需要已登录）
+      createDelegation: createAuthEndpoint(
+        '/ai/delegate',
+        { method: 'POST', body: z.object({
+          agentId: z.string(),
+          capabilities: z.array(z.string()),
+          expiresIn: z.string().default('7d'),
+        })},
+        async (ctx) => {
+          const session = ctx.context.session
+          if (!session) return ctx.json({ error: 'unauthorized' }, { status: 401 })
+
+          const token = await ctx.context.adapter.create({
+            model: 'delegationToken',
+            data: {
+              userId: session.user.id,
+              agentId: ctx.body.agentId,
+              capabilities: JSON.stringify(ctx.body.capabilities),
+              expiresAt: computeExpiry(ctx.body.expiresIn),
+              revoked: false,
+            },
+          })
+
+          return ctx.json({ token: token.id, expiresAt: token.expiresAt })
+        },
+      ),
+
+      // 验证委托令牌（AI 调用 API 时用）
+      verifyDelegation: createAuthEndpoint(
+        '/ai/verify',
+        { method: 'POST', body: z.object({ token: z.string() }) },
+        async (ctx) => {
+          const record = await ctx.context.adapter.findOne({
+            model: 'delegationToken',
+            where: [{ field: 'id', value: ctx.body.token }],
+          })
+
+          if (!record || record.revoked || new Date(record.expiresAt) < new Date()) {
+            return ctx.json({ valid: false }, { status: 401 })
+          }
+
+          return ctx.json({
+            valid: true,
+            userId: record.userId,
+            agentId: record.agentId,
+            capabilities: JSON.parse(record.capabilities),
+          })
+        },
+      ),
+    },
+  }
+}
+```
+
+然后在 auth 配置中加入：
+
+```typescript
+// server/auth.ts
+import { aiDelegation } from './plugins/ai-delegation'
+
+export const auth = betterAuth({
+  // ...之前的配置
+  plugins: [
+    passkey({ /* ... */ }),
+    aiDelegation(), // 加上 AI 委托
+  ],
+})
+```
+
+**第三步：能力模型 + vue-mind 集成（2-3 天）**
+
+在 Vue 组件中声明每个操作的认证等级，vue-mind 自动暴露给 AI：
+
+```vue
+<script setup lang="ts">
+import { defineAIAction } from '@vue-mind/runtime'
+
+// public — 不需要任何认证
+defineAIAction('search', {
+  description: '搜索视频',
+  authLevel: 'public',
+  params: { keyword: 'string' },
+  handler: (params) => searchVideos(params.keyword),
+})
+
+// delegated — AI 有委托令牌就能操作
+defineAIAction('play-video', {
+  description: '播放视频',
+  authLevel: 'delegated',
+  capabilities: ['video.play'],
+  params: { videoId: 'string' },
+  handler: (params) => playVideo(params.videoId),
+})
+
+// confirm — AI 发起，但需要用户实时确认
+defineAIAction('delete-playlist', {
+  description: '删除播放列表',
+  authLevel: 'confirm',
+  capabilities: ['playlist.delete'],
+  params: { playlistId: 'string' },
+  handler: async (params) => {
+    const confirmed = await showConfirmDialog('确定删除这个播放列表？')
+    if (!confirmed) throw new Error('用户取消')
+    return deletePlaylist(params.playlistId)
+  },
+})
+
+// human-only — 必须人类亲自操作
+defineAIAction('change-password', {
+  description: '修改密码',
+  authLevel: 'human-only',
+  handler: () => { throw new Error('此操作需要人类亲自完成') },
+})
+</script>
+```
+
+AI 拿到的页面快照会包含完整的能力图谱：
+
+```jsonc
+{
+  "actions": [
+    { "name": "search", "authLevel": "public", "aiCanCall": true },
+    { "name": "play-video", "authLevel": "delegated", "aiCanCall": true,
+      "requiredCapabilities": ["video.play"] },
+    { "name": "delete-playlist", "authLevel": "confirm", "aiCanCall": true,
+      "requiresUserConfirm": true },
+    { "name": "change-password", "authLevel": "human-only", "aiCanCall": false }
+  ],
+  "currentUser": { "id": "u_123", "capabilities": ["video.play", "playlist.*"] },
+  "aiAgent": { "id": "vue-mind-agent", "delegatedCapabilities": ["video.play"] }
+}
+```
+
+AI 看到这个快照就完全知道：哪些能调、哪些要确认、哪些碰都不要碰。
+
+#### 完整架构图
+
+```
+用户（人类）                        AI Agent
+    │                                 │
+    │ 按指纹 / Passkey                │
+    ▼                                 │
+┌──────────┐                          │
+│ Better   │── Session ──┐            │
+│ Auth     │             │            │
+│ Passkey  │             │            │
+└──────────┘             │            │
+                         ▼            │
+                   ┌───────────┐      │
+                   │ /ai/      │      │
+                   │ delegate  │ ←────┘ AI 用 delegation token 调 API
+                   │           │
+                   │ 颁发受限   │
+                   │ token     │
+                   └─────┬─────┘
+                         │
+                         ▼
+                   ┌───────────┐
+                   │ Capability │
+                   │ Check     │
+                   │           │
+                   │ token 有   │
+                   │ video.play │──→ 允许播放
+                   │ 没有       │
+                   │ playlist.  │──→ 拒绝删除
+                   │ delete     │
+                   └───────────┘
+```
+
+#### 关于 OAuth 社交登录
+
+如果你的应用还需要支持"用 Google 登录""用 GitHub 登录"，Better Auth 也原生支持：
+
+```typescript
+export const auth = betterAuth({
+  socialProviders: {
+    google: {
+      clientId: process.env.GOOGLE_CLIENT_ID!,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+    },
+    github: {
+      clientId: process.env.GITHUB_CLIENT_ID!,
+      clientSecret: process.env.GITHUB_CLIENT_SECRET!,
+    },
+  },
+  plugins: [passkey(), aiDelegation()],
+})
+```
+
+用户可以选择：Passkey 按指纹 / Google 登录 / GitHub 登录 / 邮箱密码。登录后统一走 Session → Delegation Token 流程给 AI。
+
+#### 时间估算
+
+| 阶段 | 内容 | 时间 |
+|---|---|---|
+| **Step 1** | Better Auth + Passkey + 基本登录页 | 1-2 天 |
+| **Step 2** | AI 委托插件 + delegation token | 1-2 天 |
+| **Step 3** | 能力模型 + defineAIAction authLevel | 2-3 天 |
+| **Step 4** | vue-mind 快照集成认证状态 | 1 天 |
+| **总计** | 完整的人 + AI 双友好认证系统 | **5-8 天** |
+
+### 自有 Agent + 自有应用：最短路径方案
+
+上面的 Better Auth 方案是为 **"开放给第三方 AI/用户"** 设计的完整认证系统。但如果当前目标是 **自己的 Agent 操控自己的应用**，需要一个完全不同的思维模式：
+
+> **当 Agent 和应用都是你的、跑在同一台机器上时，"连接本身就是认证"。不要过度工程化。**
+
+#### 思维模式对比
+
+```
+通用方案（对外开放）：
+  用户 → 登录 → Session → 颁发 Token → AI 拿 Token → API 鉴权 → 能力检查
+  复杂度：★★★★★
+
+自有方案（自己用）：
+  我的 Agent → 连上我的应用 → 直接操作
+  复杂度：★☆☆☆☆
+```
+
+类比：你在自己家里不需要每开一扇门都刷门禁卡。你的电脑上 VS Code 操作文件不需要"登录文件系统"——进程身份就是认证。Agent 也应该如此。
+
+#### 三层架构，逐步升级
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│ Level 0 — Electron IPC（Agent 和应用在同一进程）                 │
+│ 适用：Agent 就是你的 Electron 应用的一部分（如 smart-finder）     │
+│ 认证：无需。同进程 = 完全信任                                    │
+│ 复杂度：零                                                      │
+├────────────────────────────────────────────────────────────────┤
+│ Level 1 — Local Channel（Agent 和 Web 应用在同机不同进程）       │
+│ 适用：Agent 是独立进程，应用跑在浏览器里（Vue + vue-mind）        │
+│ 认证：localhost + 一次性握手 token（OS Keychain 共享）            │
+│ 复杂度：低                                                      │
+├────────────────────────────────────────────────────────────────┤
+│ Level 2 — Remote Channel（Agent 和应用跨设备）                   │
+│ 适用：Mac 上的 Agent 操控手机上的应用                             │
+│ 认证：Better Auth + Delegation Token（上一节方案）               │
+│ 复杂度：高，但只在需要时引入                                     │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**关键原则：从 Level 0 开始，不要跳级。** 大多数个人场景在 Level 1 就能完美覆盖。
+
+#### Level 0：Electron IPC（零认证）
+
+你的 `smart-finder` 已经在用这个模式：
+
+```
+┌───────────────────────────────────────┐
+│  smart-finder (Electron)              │
+│                                       │
+│  ┌──────────┐     ┌──────────────┐   │
+│  │ 渲染进程   │ IPC │ 主进程        │   │
+│  │ (Vue UI)  │◄───►│ (Agent 逻辑) │   │
+│  └──────────┘     └──────┬───────┘   │
+│                          │            │
+│                  Safari WebDriver     │
+│                  AppleScript          │
+│                          │            │
+│                    ┌─────▼─────┐      │
+│                    │ 外部网站   │      │
+│                    │ B站/腾讯   │      │
+│                    │ (复用浏览器 │      │
+│                    │  Cookie)   │      │
+│                    └───────────┘      │
+└───────────────────────────────────────┘
+```
+
+优势：
+- Agent 逻辑在主进程，UI 在渲染进程，Electron IPC 天然双向通信
+- 操作外部网站走 Safari WebDriver + Cookie，和真人行为完全一致（你的 `biliApi.ts` 已经这么做了）
+- **零认证开销**，同进程天然信任
+
+**这就是当前最佳起点。**
+
+#### Level 1：Local Channel（自有 Web 应用）
+
+当你开始开发独立的 Vue Web 应用（不是 Electron），需要 Agent 从外部操控时：
+
+```
+┌────────────────────────────────────────────────────────────┐
+│  你的 Mac                                                   │
+│                                                             │
+│  ┌─────────────────┐     WebSocket      ┌────────────────┐ │
+│  │ 你的 AI Agent    │◄────(localhost)────►│ 你的 Vue App   │ │
+│  │ (Node.js 进程)   │                    │ (浏览器中运行)  │ │
+│  │                  │                    │                 │ │
+│  │ 1. 读 Keychain   │                    │ 1. 启动时生成   │ │
+│  │    拿到连接密钥   │                    │    一次性密钥    │ │
+│  │ 2. 连接 WS       │                    │ 2. 存入 Keychain│ │
+│  │ 3. 握手验证      │                    │ 3. 等待 Agent   │ │
+│  │ 4. 操控 vue-mind │                    │ 4. Channel 通信 │ │
+│  └─────────────────┘                    └────────────────┘ │
+│                                                             │
+│          共享：macOS Keychain（存一次性连接密钥）              │
+└────────────────────────────────────────────────────────────┘
+```
+
+具体实现：
+
+```typescript
+// ============ 应用侧：Vue App 启动时 ============
+
+import { createAIChannel } from '@vue-mind/runtime'
+
+const channel = createAIChannel()
+
+// 应用启动时生成一个随机连接密钥，存到固定位置
+// Agent 读取这个密钥来证明"我在同一台机器上"
+const connectionSecret = crypto.randomUUID()
+
+// 方案 A：写入 OS Keychain（最安全）
+// 方案 B：写入固定文件 ~/.vue-mind/channel-secret（够用）
+await writeSecret('vue-mind-channel', connectionSecret)
+
+// 启动 WebSocket 服务（仅监听 localhost）
+const wss = new WebSocketServer({ host: '127.0.0.1', port: 9527 })
+
+wss.on('connection', (ws) => {
+  ws.once('message', (msg) => {
+    const { secret } = JSON.parse(msg.toString())
+    if (secret !== connectionSecret) {
+      ws.close(4001, 'invalid secret')
+      return
+    }
+    // 验证通过 → 桥接到 vue-mind Channel
+    channel.bridgeToWebSocket(ws)
+  })
+})
+```
+
+```typescript
+// ============ Agent 侧：连接应用 ============
+
+// 读取应用写入的连接密钥
+const secret = await readSecret('vue-mind-channel')
+
+const ws = new WebSocket('ws://127.0.0.1:9527')
+ws.onopen = () => {
+  // 用密钥握手
+  ws.send(JSON.stringify({ secret }))
+}
+
+ws.onmessage = (event) => {
+  // 收到 vue-mind Channel 的消息
+  // 可以调用 defineAIAction 定义的所有操作
+  // 可以获取页面快照
+  // 可以订阅状态变化
+}
+```
+
+为什么只需要这么简单？
+
+- **WebSocket 监听 127.0.0.1** → 只有本机进程能连，外部网络完全不可达
+- **一次性密钥** → 防止本机其他应用意外连入（虽然概率极低）
+- **密钥存 Keychain** → macOS 级别的进程隔离保护，只有你的 Agent 能读
+- **不需要 OAuth、JWT、Session** → 同机两个进程，握手一次就够了
+
+#### Level 1 对应的 vue-mind 改造
+
+只需要给 `AIChannel` 增加 WebSocket 桥接能力：
+
+```typescript
+// @vue-mind/runtime 新增
+export function createLocalServer(channel: AIChannel, options?: {
+  port?: number        // 默认 9527
+  secretProvider?: () => Promise<string>  // 默认 crypto.randomUUID()
+}): void
+
+// Agent SDK（新包 @vue-mind/agent）
+export function connectToApp(options?: {
+  port?: number
+  secretProvider?: () => Promise<string>
+}): AIChannel
+```
+
+Agent 拿到的 `AIChannel` 和应用内部的完全一样——同样的 `callAction`、`getSnapshot`、`subscribe`。
+
+#### 实际场景：公网部署 + Electron 客户端
+
+自有应用不是本地玩具——它是部署在公网的 Web 服务，用户通过浏览器或 Electron 客户端访问。这意味着 **从第一天起就需要正经认证**。
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       你的服务端（公网）                       │
+│                                                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │ Vue App      │  │ API Server   │  │ Better Auth  │      │
+│  │ (静态资源)    │  │ (业务逻辑)    │  │ (认证服务)    │      │
+│  └──────────────┘  └──────┬───────┘  └──────┬───────┘      │
+│                           │                  │               │
+│                    vue-mind Channel     认证 + Token          │
+│                      (WSS 双向)        (Passkey/OAuth)       │
+│                           │                  │               │
+└───────────────────────────┼──────────────────┼───────────────┘
+                            │                  │
+              ┌─────────────┼──────────────────┼──────────┐
+              │             │      公网         │          │
+              │             │                  │          │
+    ┌─────────▼──┐   ┌─────▼──────┐   ┌──────▼───────┐  │
+    │ 浏览器用户  │   │ Electron   │   │ 第三方 Agent │  │
+    │ (人类)     │   │ 客户端      │   │ (将来)       │  │
+    │            │   │ (内置 AI   │   │              │  │
+    │ Passkey 登录│   │  Agent)    │   │ Delegation   │  │
+    │ Session    │   │            │   │ Token        │  │
+    └────────────┘   │ 一次登录    │   └──────────────┘  │
+                     │ Token 存   │                     │
+                     │ OS Keychain│                     │
+                     └────────────┘                     │
+              └─────────────────────────────────────────┘
+```
+
+三类客户端，一套认证：
+
+| 客户端 | 登录方式 | 凭证存储 | AI Agent 如何用 |
+|---|---|---|---|
+| **浏览器** | Passkey 按指纹 / OAuth 社交登录 | httpOnly Cookie | Agent 通过 vue-mind Channel（WSS）复用已有 Session |
+| **Electron 客户端** | 首次启动 → 内嵌 WebView OAuth 授权 → 拿 Token | OS Keychain（macOS/Windows） | Agent 直接用 Keychain 中的 Token 调 API |
+| **第三方 Agent** | Delegation Token（人类授权后颁发） | Agent 自行管理 | 受限 Token + 能力模型 |
+
+#### 核心流程：Electron 客户端（内置 AI Agent）
+
+这是你最主要的场景——Electron 客户端里跑 AI Agent，通过公网调你的服务：
+
+```
+首次启动（仅一次）：
+──────────────────
+用户打开 Electron App
+    │
+    ▼
+Electron 弹出 OAuth 授权页（系统浏览器 / 内嵌 WebView）
+    │ 用户 Passkey 按指纹 / Google 登录 / 邮箱密码
+    ▼
+服务端返回 { accessToken, refreshToken }
+    │
+    ▼
+Electron 存入 OS Keychain
+    │  macOS: Keychain Access
+    │  Windows: Credential Manager
+    ▼
+完成。用户永远不需要再登录（除非主动登出）
+
+
+日常使用：
+──────────
+Electron 启动
+    │
+    ▼ 从 Keychain 读取 Token
+    │
+    ├──→ AI Agent 调用后端 API
+    │    headers: { Authorization: `Bearer ${accessToken}` }
+    │
+    ├──→ AI Agent 连接 vue-mind Channel（WSS）
+    │    wss://yourapp.com/channel?token=xxx
+    │
+    ├──→ Token 快过期？自动用 refreshToken 换新的
+    │    无感续期，用户完全不知道
+    │
+    └──→ refreshToken 也过期了？（比如 30 天没打开）
+         弹出登录页，重新授权一次
+```
+
+#### 服务端实现（Better Auth + vue-mind Channel）
+
+```typescript
+// server/auth.ts — 认证服务
+import { betterAuth } from 'better-auth'
+import { passkey } from '@better-auth/passkey'
+
+export const auth = betterAuth({
+  database: postgres(process.env.DATABASE_URL),
+
+  plugins: [
+    passkey({
+      rpID: 'yourapp.com',
+      rpName: 'Your App',
+      origin: 'https://yourapp.com',
+    }),
+  ],
+
+  // Electron 客户端通过 OAuth PKCE 流程获取 Token
+  session: {
+    // 浏览器用户：httpOnly Cookie（自动管理）
+    // Electron 用户：Bearer Token（手动传递）
+    // Better Auth 两种都支持，根据请求头自动判断
+  },
+})
+```
+
+```typescript
+// server/channel.ts — vue-mind Channel 公网版
+import { WebSocketServer } from 'ws'
+import { auth } from './auth'
+
+const wss = new WebSocketServer({ noServer: true })
+
+// HTTP Upgrade 时验证 Token
+server.on('upgrade', async (request, socket, head) => {
+  const url = new URL(request.url!, `https://${request.headers.host}`)
+
+  if (url.pathname === '/channel') {
+    const token = url.searchParams.get('token')
+    const session = await auth.api.getSession({ headers: { authorization: `Bearer ${token}` } })
+
+    if (!session) {
+      socket.destroy()
+      return
+    }
+
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      // Token 合法 → 建立 Channel，注入用户身份
+      const channel = createAIChannel({ user: session.user })
+      channel.bridgeToWebSocket(ws)
+    })
+  }
+})
+```
+
+```typescript
+// electron/main.ts — Electron 客户端
+import keytar from 'keytar'
+
+const SERVICE_NAME = 'com.yourapp.agent'
+
+/** 启动时获取 Token，没有则触发登录 */
+async function getAccessToken(): Promise<string> {
+  const stored = await keytar.getPassword(SERVICE_NAME, 'access_token')
+  if (stored && !isExpired(stored)) return stored
+
+  // 尝试刷新
+  const refresh = await keytar.getPassword(SERVICE_NAME, 'refresh_token')
+  if (refresh) {
+    const result = await fetch('https://yourapp.com/api/auth/refresh', {
+      method: 'POST',
+      body: JSON.stringify({ refreshToken: refresh }),
+    }).then(r => r.json())
+
+    if (result.accessToken) {
+      await keytar.setPassword(SERVICE_NAME, 'access_token', result.accessToken)
+      return result.accessToken
+    }
+  }
+
+  // 都失败 → 弹出登录
+  return showLoginWindow()
+}
+
+/** Agent 连接 vue-mind Channel */
+async function connectChannel() {
+  const token = await getAccessToken()
+  const ws = new WebSocket(`wss://yourapp.com/channel?token=${token}`)
+
+  // 连上就能操作：getSnapshot / callAction / subscribe
+  return bridgeToChannel(ws)
+}
+```
+
+#### 浏览器用户 + vue-mind Channel
+
+浏览器用户已经有 Session Cookie，vue-mind Channel 直接复用：
+
+```typescript
+// 前端 Vue App 中（浏览器环境）
+import { createAIChannel } from '@vue-mind/runtime'
+
+const channel = createAIChannel()
+
+// 浏览器内的 Channel 不走公网 WebSocket
+// 而是直接在页面内运行——AI Agent 通过 WebMCP 或 WSS 接入后
+// 调用的 action 在浏览器内执行，请求自动带 Cookie
+```
+
+#### 和"纯 Electron 本地应用"的区别
+
+| | 纯本地（smart-finder 模式） | 公网部署 + Electron 客户端 |
+|---|---|---|
+| 服务端 | 无（逻辑全在本地） | 有（API + 数据库 + 认证） |
+| 认证 | IPC，零认证 | Better Auth（Passkey + Token） |
+| Agent 位置 | Electron 主进程内 | Electron 主进程，但调远端 API |
+| 数据 | 全在本地 | 服务端存储 + 本地缓存 |
+| Channel | 进程内直通 | WSS 公网连接（Token 验证） |
+| 适用场景 | 个人工具 | 多用户产品 |
+
+smart-finder 这种纯本地应用，IPC 零认证没问题。但只要有公网服务端，Better Auth + Token 就是第一天的事。
+
+#### 实施优先级（修正版）
+
+| 优先级 | 做什么 | 时间 |
+|---|---|---|
+| **P0** | Better Auth 服务端 + Passkey + OAuth | 2-3 天 |
+| **P0** | vue-mind Channel WSS 公网版（Token 验证） | 1-2 天 |
+| **P1** | Electron 客户端 OAuth 登录 + Keychain Token 存储 | 2-3 天 |
+| **P1** | `@vue-mind/agent` SDK（Token 管理 + Channel 连接） | 1-2 天 |
+| **P2** | AI Delegation Token（第三方 Agent 接入） | 按需 |
+| **P2** | 能力模型（authLevel + Capability） | 按需 |
+
+### 问题 B：操控第三方网站 — 通用浏览器桥接
+
+`smart-finder` 现有的 Safari WebDriver + AppleScript 方案有一个硬伤：**只能在 macOS + Safari 上用**。换 Chrome 不行，换 Windows 不行，换手机更不行。
+
+这不是一个可以忽略的问题——用户可能用 Chrome、Arc、Edge，你的 Agent 不能绑死在一个浏览器上。
+
+#### 方案对比
+
+| 方案 | 浏览器 | 平台 | 复用用户登录态 | 实时双向 | 复杂度 | 推荐 |
+|---|---|---|---|---|---|---|
+| **Safari WebDriver + AppleScript** | Safari 独占 | macOS 独占 | 是（Cookie 在浏览器内） | 否（请求/响应） | 中 | 不推荐通用 |
+| **Chrome DevTools Protocol (CDP)** | Chromium 系 | 全平台 | 是（连接已有实例） | 是 | 中 | 短期首选 |
+| **浏览器扩展 + Native Messaging** | 所有浏览器 | 全平台 | 是（运行在浏览器内） | 是 | 高 | 长期最优 |
+| **Playwright** | Chromium/FF/WebKit | 全平台 | 部分（需 CDP 连接） | 否 | 低 | 测试场景 |
+| **WebDriver BiDi** | 标准化中 | 全平台 | 是 | 是 | — | 未来标准 |
+
+#### 推荐路径：CDP → 浏览器扩展 → WebDriver BiDi
+
+**第一步（现在）：Chrome DevTools Protocol — 覆盖 70% 场景**
+
+CDP 可以连接到用户已经打开的 Chrome/Edge/Arc/Brave，直接复用用户的登录态：
+
+```
+用户正常使用 Chrome，已登录 B站、GitHub 等
+    │
+    │ 启动时带 --remote-debugging-port=9222
+    │ （或通过扩展暴露 CDP）
+    ▼
+┌────────────────────────────────────┐
+│  Chrome（用户真实浏览器实例）         │
+│  ├── Tab 1: bilibili.com (已登录)  │
+│  ├── Tab 2: github.com (已登录)    │
+│  └── Tab 3: ...                    │
+└──────────────┬─────────────────────┘
+               │ CDP WebSocket
+               │ ws://127.0.0.1:9222
+               ▼
+┌────────────────────────────────────┐
+│  你的 Agent（Node.js）              │
+│                                    │
+│  // 连接到用户已有的 Chrome          │
+│  const browser = await chromium     │
+│    .connectOverCDP('http://        │
+│     localhost:9222')               │
+│                                    │
+│  // 拿到用户已登录的页面             │
+│  const pages = browser             │
+│    .contexts()[0].pages()          │
+│                                    │
+│  // 在 B站页面执行 JS — 带 Cookie   │
+│  const result = await page         │
+│    .evaluate(() =>                 │
+│      fetch('/x/web-interface/nav') │
+│        .then(r => r.json())        │
+│    )                               │
+└────────────────────────────────────┘
+```
+
+和 Safari WebDriver 方案的本质区别：
+
+| | Safari WebDriver | CDP |
+|---|---|---|
+| 浏览器 | Safari 独占 | Chrome/Edge/Arc/Brave/Opera |
+| 平台 | macOS 独占 | Mac/Windows/Linux |
+| 通信 | HTTP 请求/响应（单向） | WebSocket（双向实时） |
+| 能力 | 基本页面操作 | 网络拦截、Cookie 操控、JS 调试、性能分析… |
+| 速度 | 慢（每次操作都是 HTTP 往返） | 快（持久连接、事件推送） |
+
+CDP 的实际接入代码很简单：
+
+```typescript
+// agent/browser-bridge.ts
+import { chromium } from 'playwright'
+
+/**
+ * 连接到用户已经在运行的 Chrome 浏览器
+ * 要求：Chrome 启动时带 --remote-debugging-port=9222
+ */
+async function connectToUserBrowser() {
+  const browser = await chromium.connectOverCDP('http://127.0.0.1:9222')
+  const context = browser.contexts()[0]!
+  return context
+}
+
+/**
+ * 在指定网站的已登录页面中执行 JS
+ * 自动携带用户的 Cookie，和用户手动操作完全一致
+ */
+async function executeInSite(context: BrowserContext, url: string, script: string) {
+  // 找到已打开的标签页，或新开一个
+  let page = context.pages().find(p => p.url().includes(new URL(url).host))
+  if (!page) {
+    page = await context.newPage()
+    await page.goto(url)
+  }
+
+  return page.evaluate(script)
+}
+
+// 用法：在 B站执行请求（复用 Chrome 中的登录态）
+const navInfo = await executeInSite(
+  context,
+  'https://www.bilibili.com',
+  `fetch('https://api.bilibili.com/x/web-interface/nav').then(r => r.json())`
+)
+```
+
+**让用户的 Chrome 启动时带调试端口的方法：**
+
+```bash
+# macOS
+open -a "Google Chrome" --args --remote-debugging-port=9222
+
+# Windows
+chrome.exe --remote-debugging-port=9222
+
+# Linux
+google-chrome --remote-debugging-port=9222
+
+# 或者：修改 Chrome 快捷方式/启动脚本，永久生效
+```
+
+**第二步（中期）：浏览器扩展 — 真正的全浏览器通用**
+
+CDP 还是有局限：只支持 Chromium 系浏览器，而且需要用户带参数启动 Chrome（不太方便）。
+
+浏览器扩展才是终极方案：
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  浏览器（Chrome / Firefox / Edge / Safari）                │
+│                                                           │
+│  ┌─────────────────────────────────────────┐             │
+│  │  AI Bridge Extension（你开发的扩展）      │             │
+│  │                                          │             │
+│  │  能力：                                   │             │
+│  │  ├── chrome.cookies API — 读取任意 Cookie │             │
+│  │  ├── chrome.tabs API — 管理标签页          │             │
+│  │  ├── content script — 在页面中执行 JS     │             │
+│  │  ├── chrome.webRequest — 拦截/修改请求     │             │
+│  │  └── 检测登录状态、Cookie 过期              │             │
+│  │                                          │             │
+│  │  通信：                                   │             │
+│  │  Native Messaging（和本地 Agent 通信）     │             │
+│  │  或 WebSocket（ws://127.0.0.1:port）     │             │
+│  └──────────────────┬──────────────────────┘             │
+│                     │                                     │
+└─────────────────────┼─────────────────────────────────────┘
+                      │ Native Messaging (stdin/stdout)
+                      │ 或 WebSocket
+                      ▼
+┌──────────────────────────────────────────────┐
+│  你的 Agent（Node.js）                        │
+│                                               │
+│  agent.executeInTab('bilibili.com', script)   │
+│  agent.getCookies('github.com')               │
+│  agent.checkLoginStatus('bilibili.com')       │
+└──────────────────────────────────────────────┘
+```
+
+为什么扩展是终极方案：
+
+| 优势 | 说明 |
+|---|---|
+| **全浏览器** | Chrome、Firefox、Edge、Safari 都支持扩展（Manifest V3 / WebExtensions API） |
+| **全平台** | Mac、Windows、Linux 统一 API |
+| **零配置** | 用户安装一次扩展就行，不需要带参数启动浏览器 |
+| **完整能力** | Cookie 读写、页面 JS 注入、网络拦截、标签管理——比 CDP 更贴近用户视角 |
+| **安全** | 扩展运行在浏览器沙箱内，通过 Native Messaging 和 Agent 通信，权限可控 |
+| **登录检测** | 扩展可以监听 Cookie 变化，主动通知 Agent "B 站登录已过期" |
+
+社区已有的开源参考：
+
+| 项目 | 说明 |
+|---|---|
+| [Nanobrowser](https://github.com/nanobrowser/nanobrowser) | AI 驱动的 Chrome 扩展，支持多 Agent 协作，12k+ stars |
+| [NativeMind](https://github.com/NativeMindBrowser/NativeMindExtension) | 隐私优先，支持 Chrome/Firefox/Edge，本地 AI 模型 |
+| [browser-use](https://github.com/browser-use/browser-use) | Python 生态的 AI 浏览器自动化 |
+
+**第三步（远期）：WebDriver BiDi — W3C 标准化**
+
+WebDriver BiDi 是 W3C 正在制定的新一代浏览器自动化标准，双向通信，所有浏览器厂商参与。目前还在 Working Draft 阶段（2024 年底发布首个公开草案），预计 2026-2027 年各浏览器全面支持。
+
+等 BiDi 成熟后，不需要 CDP 也不需要扩展，标准化协议直接搞定。但现在还不能用。
+
+#### 推荐的演进路线
+
+```
+现在                    3-6 个月后                 1-2 年后
+  │                        │                         │
+  ▼                        ▼                         ▼
+CDP 连接 Chrome          浏览器扩展                 WebDriver BiDi
+(快速可用)              (全浏览器通用)              (W3C 标准)
+                                                     
+覆盖：Chromium 系        覆盖：所有浏览器             覆盖：所有浏览器
+平台：全平台              平台：全平台                 平台：全平台
+成本：1-2 天              成本：1-2 周                 成本：等标准落地
+```
+
+#### smart-finder 的迁移路径
+
+现有 `safariManager.ts` 的架构可以抽象为一个通用接口，然后按浏览器选择不同后端：
+
+```typescript
+// agent/browser-bridge.ts — 通用浏览器桥接接口
+
+interface BrowserBridge {
+  /** 在指定网站的页面中执行 JS（携带用户 Cookie） */
+  executeInSite(host: string, script: string): Promise<string>
+
+  /** 获取指定网站的 Cookie */
+  getCookies(host: string): Promise<Cookie[]>
+
+  /** 检查指定网站的登录状态 */
+  checkLoginStatus(host: string): Promise<boolean>
+
+  /** 打开 URL */
+  openUrl(url: string): Promise<void>
+
+  /** 获取当前所有标签页 */
+  getTabs(): Promise<TabInfo[]>
+}
+
+// 根据运行环境自动选择后端
+function createBrowserBridge(): BrowserBridge {
+  // 优先级：扩展 > CDP > Safari WebDriver
+  if (extensionAvailable()) return new ExtensionBridge()
+  if (cdpAvailable())       return new CDPBridge()
+  if (isMacOS())            return new SafariBridge()
+  throw new Error('没有可用的浏览器后端')
+}
+```
+
+这样 `biliApi.ts`、`tencentManager.ts` 等业务代码不需要改——它们只依赖 `BrowserBridge` 接口，底层用 Safari 还是 CDP 还是扩展对它们完全透明。
+
+```typescript
+// biliApi.ts — 改造后
+import { createBrowserBridge } from '../browser-bridge'
+
+const bridge = createBrowserBridge()
+
+async function safariGet(url: string): Promise<string> {
+  // 之前：runJavaScript(...)  ← Safari 专属
+  // 之后：bridge.executeInSite(...)  ← 通用
+  return bridge.executeInSite('bilibili.com', `
+    fetch('${url}', { credentials: 'include' }).then(r => r.text())
+  `)
+}
+```
+
+#### 完整实施优先级（自有应用 + 第三方网站）
+
+| 优先级 | 问题 | 做什么 | 时间 |
+|---|---|---|---|
+| **P0** | A | Better Auth 服务端 + Passkey + vue-mind Channel WSS | 3-4 天 |
+| **P0** | A | Electron 客户端 OAuth 登录 + Keychain Token 存储 | 2-3 天 |
+| **P1** | A | `@vue-mind/agent` SDK（Token 管理 + Channel 连接） | 1-2 天 |
+| **P1** | B | 抽象 `BrowserBridge` 接口，加 CDP 后端 | 2-3 天 |
+| **P2** | B | 迁移 biliApi/tencentManager 到 BrowserBridge | 1-2 天 |
+| **P3** | B | 开发 AI Bridge 浏览器扩展（全浏览器通用） | 1-2 周 |
+| **P3** | A | AI Delegation Token（第三方 Agent 接入） | 按需 |
+
 ---
 
 ## npm 发布
@@ -910,7 +2228,17 @@ pnpm version:minor   # 0.1.0 → 0.2.0
 - [x] AIChannel 双向异步通信
 - [x] defineAIAction 一次定义自动生成 Tool
 - [x] WebMCP 桥接
-- [ ] Auth 认证感知 — 组件声明认证需求，快照包含登录状态
+- [ ] Better Auth 服务端 — Passkey + OAuth + Token，公网部署认证基础设施
+- [ ] AIChannel WSS 公网版 — Channel 通过 WSS + Token 验证，支持公网双向通信
+- [ ] Electron 客户端 OAuth — OAuth PKCE 登录 + OS Keychain Token 存储 + 自动续期
+- [ ] @vue-mind/agent SDK — Token 管理 + Channel 连接，Agent 侧一行代码接入
+- [ ] BrowserBridge 抽象层 — 统一接口（CDP / Extension / Safari WebDriver 多后端）
+- [ ] CDP 后端 — 通过 Chrome DevTools Protocol 连接 Chromium 系浏览器
+- [ ] AI Bridge 浏览器扩展 — 全浏览器通用（Chrome/Firefox/Edge/Safari），Native Messaging 通信
+- [ ] Session 健康检测 — Cookie/Token 过期自动检测和通知
+- [ ] Auth 认证感知 — 组件声明 authLevel，快照包含登录状态
+- [ ] AI Credential Manager — 统一凭证管理器（保险箱 + Profile + 健康监控 + 跨设备同步）
+- [ ] Service Registry — 社区维护的网站认证方式注册表
 - [ ] Browser Auth Bridge — 从 Safari/Chrome 提取复用 Cookie
 - [ ] 状态机建模 — 描述页面状态转换（idle → loading → playing → paused）
 - [ ] Vue Router 全量路由图谱提取

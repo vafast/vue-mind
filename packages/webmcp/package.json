@@ -2,14 +2,32 @@
   "name": "@vue-mind/webmcp",
   "version": "0.1.0",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
   },
-  "files": ["src"],
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --external @vue-mind/shared --external @vue-mind/runtime --clean"
+  },
   "dependencies": {
     "@vue-mind/shared": "workspace:*",
     "@vue-mind/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vafast/vue-mind.git",
+    "directory": "packages/webmcp"
   }
 }

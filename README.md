@@ -665,6 +665,63 @@ AI 看到快照就知道：当前是 VIP 登录态，可以播放高清，但 4K
 
 这和人使用电脑是一致的：你不会因为打开了一个新的 Tab 就需要重新登录。AI 作为用户的延伸，也不应该。
 
+### 附：npm 发布认证也是这个问题
+
+npm 现在发布包的流程：
+
+```
+npm publish
+    → 打开 Chrome 浏览器
+    → 跳转 npmjs.com 登录页
+    → WebAuthn 弹窗
+    → Touch ID 按指纹
+    → 回调确认
+    → 才能发布
+```
+
+这个流程完全为人类设计：浏览器 + 生物识别。AI Agent 或 CI 环境根本无法完成。
+
+**解法：npm Automation Token**
+
+npm 支持创建不需要 2FA 的 Automation Token，专为 CI/CD 和脚本使用：
+
+```bash
+# 方式一：网页创建（需登录一次）
+# npmjs.com → Access Tokens → Generate New Token → Automation
+
+# 方式二：CLI 创建
+npm token create --type=automation
+
+# 配置到环境变量
+echo "//registry.npmjs.org/:_authToken=npm_xxxx" > ~/.npmrc
+
+# 之后 publish 不再弹浏览器
+pnpm publish:all
+```
+
+这其实就是上面"第二层"思路的实践：**用长效 Token 替代交互式认证，让非人类 Actor（AI/CI）也能操作**。
+
+---
+
+## npm 发布
+
+```bash
+# 构建所有包
+pnpm build
+
+# 试运行（不真正发布）
+pnpm publish:dry
+
+# 正式发布（需要 npm 登录或 Automation Token）
+pnpm publish:all
+
+# 批量升级版本
+pnpm version:patch   # 0.1.0 → 0.1.1
+pnpm version:minor   # 0.1.0 → 0.2.0
+```
+
+发布顺序由 pnpm 自动处理依赖拓扑：`shared` → `runtime` / `vite-plugin` → `webmcp`。
+
 ---
 
 ## Roadmap

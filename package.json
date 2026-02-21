@@ -5,8 +5,11 @@
   "description": "AI-native semantic layer for Vue 3 — automatically expose component capabilities to AI agents",
   "scripts": {
     "dev": "pnpm -C playground dev",
-    "build": "pnpm -r build",
-    "test": "pnpm -r test"
+    "build": "pnpm -r --filter './packages/*' build",
+    "publish:all": "pnpm build && pnpm -r --filter './packages/*' publish --no-git-checks",
+    "publish:dry": "pnpm build && pnpm -r --filter './packages/*' publish --dry-run --no-git-checks",
+    "version:patch": "pnpm -r --filter './packages/*' exec -- npm version patch --no-git-tag-version",
+    "version:minor": "pnpm -r --filter './packages/*' exec -- npm version minor --no-git-tag-version"
   },
   "engines": {
     "node": ">=18"
@@ -16,5 +19,10 @@
     "tsup": "^8.5.1",
     "typescript": "^5.5.0",
     "vue-tsc": "^3.2.4"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vafast/vue-mind.git"
   }
 }

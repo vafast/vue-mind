@@ -1,0 +1,20 @@
+{
+  "name": "vue-mind",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-native semantic layer for Vue 3 — automatically expose component capabilities to AI agents",
+  "scripts": {
+    "dev": "pnpm -C playground dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.5.0",
+    "vue-tsc": "^3.2.4"
+  }
+}

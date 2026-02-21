@@ -712,6 +712,174 @@ IETF 正在推的两个标准正是这个思路：
 
 这是 Web 认证从"证明你是人"到"证明你被人授权"的范式转移。
 
+### 技术选型优先级：现在开发 Web 应用该选什么
+
+如果你现在要开发一个同时对人和 AI 友好的 Web 应用，推荐按以下优先级实现：
+
+#### 整体架构
+
+两条路径，汇聚到同一个能力模型：
+
+```
+人类路径：  Passkey（WebAuthn）→ Session → OAuth Token（完整权限）
+                                                    │
+                                                    ▼
+                                         统一的能力访问控制
+                                                    ▲
+                                                    │
+AI 路径：   人类授权委托 → 受限 OAuth Token → 限定能力 → 限定时间
+```
+
+#### P0 — 必须做（基础设施）
+
+**1. Passkeys（WebAuthn）— 人类认证的终极方案**
+
+```
+优先级：★★★★★
+人类友好：★★★★★（按指纹就行，比密码快 2 倍）
+AI 友好：★☆☆☆☆（AI 做不了，但不需要——这是人类入口）
+成熟度：★★★★★（Google/Apple/Microsoft 全面支持，2026 采用率 >50%）
+```
+
+Passkeys 是人类登录的最优解：防钓鱼、无密码、跨设备同步。
+
+关键：**Passkeys 不是 AI 的障碍，而是信任的起点**。人通过 Passkey 证明身份后，才能给 AI 颁发委托令牌。
+
+```
+人按指纹 → 身份确认 → 颁发 delegation token → AI 拿着 token 操作
+     ↑                                              │
+     这一步只有人能做（正确的）                        这一步 AI 可以做（正确的）
+```
+
+**2. OAuth 2.1 + OIDC — Token 基础设施**
+
+```
+优先级：★★★★★
+人类友好：★★★★☆（用户无感，授权页点一下）
+AI 友好：★★★★★（Token 传递天然适合非人类 Actor）
+成熟度：★★★★★（行业标准，所有云平台支持）
+```
+
+OAuth 2.1 是整个 auth 体系的骨架。关键改进（相比 2.0）：
+- 强制 PKCE（防授权码劫持）
+- 移除 Implicit Flow（不安全）
+- Refresh Token 必须绑定客户端
+
+**这是人和 AI 共用的基础设施**：人通过 Passkey 获得 Session → Session 换 OAuth Token → Token 可以分发给 AI。
+
+**3. 能力模型（Capability-based Access Control）— 替代角色模型**
+
+```
+优先级：★★★★★
+人类友好：★★★★☆
+AI 友好：★★★★★（AI 天然理解结构化能力列表）
+成熟度：★★★☆☆（理念成熟，但大多数应用还在用 RBAC）
+```
+
+传统 RBAC（角色访问控制）：`user.role === 'vip'` → 允许。AI 不理解"VIP"意味着什么。
+
+能力模型：
+
+```json
+{
+  "capabilities": {
+    "video.play": { "maxQuality": "4K" },
+    "video.download": false,
+    "playlist.create": true,
+    "playlist.delete": { "requireConfirm": true }
+  }
+}
+```
+
+AI 直接看到：能播 4K、不能下载、能建播放列表、删除要确认。
+
+#### P1 — 应该做（AI 友好层）
+
+**4. 委托令牌（Delegation Token / AAP 模式）**
+
+```
+优先级：★★★★☆
+人类友好：—（对人透明，不感知）
+AI 友好：★★★★★
+成熟度：★★☆☆☆（IETF 草案阶段，但概念可先自行实现）
+```
+
+人类授权后，给 AI 一个受限 Token：
+
+```javascript
+// 人类在设置页面点击"授权 AI 助手"
+const delegationToken = await createDelegation({
+  agent: 'vue-mind-agent',
+  scope: ['video.play', 'playlist.create'],
+  expiresIn: '7d',
+  constraints: { rateLimit: '100/hour' },
+})
+```
+
+AAP 标准还在草案阶段，但你现在就可以按这个模式设计 JWT claims。等标准落地时改动最小。
+
+**5. Channel 确认机制（vue-mind 的 defineAIAction + confirm）**
+
+```
+优先级：★★★★☆
+人类友好：★★★★★（和普通确认框体验一致）
+AI 友好：★★★★★（Promise 驱动，拿到真实结果）
+成熟度：★★★★☆（vue-mind 已实现）
+```
+
+Level 2（实时确认）操作的最佳实现。AI 调用 → 弹确认框 → 用户点确认 → Promise resolve → AI 拿到结果。不需要额外的 auth 机制，复用 UI 交互本身作为确认。
+
+#### P2 — 可以做（生态兼容）
+
+**6. MCP Auth — 工具生态互通**
+
+```
+优先级：★★★☆☆
+AI 友好：★★★★★
+成熟度：★★★☆☆
+```
+
+如果你的应用要接入 MCP 生态（让 Claude/GPT 等 Agent 直接调用），需要实现 MCP 的 OAuth 2.1 认证流程。本质上就是 P0 的 OAuth 2.1 加上 MCP 特定的 metadata discovery。
+
+**7. Transaction Tokens — 多 Agent 协作**
+
+```
+优先级：★★☆☆☆（除非你做多 Agent 平台）
+AI 友好：★★★★★
+成熟度：★★☆☆☆
+```
+
+当 Agent A 调用 Agent B 时传递授权链。大多数应用当前不需要。
+
+#### 不推荐 / 应淘汰
+
+| 技术 | 问题 |
+|---|---|
+| **密码 + 短信验证码** | 最弱安全性，AI 无法操作短信，SIM 卡可劫持 |
+| **CAPTCHA / reCAPTCHA** | 专门反 AI，但也严重损害人类体验。用 Passkey 替代 |
+| **SAML** | 复杂、XML、企业遗产。用 OIDC 替代 |
+| **OAuth 2.0 Implicit Flow** | 已被 OAuth 2.1 废弃，不安全 |
+| **自定义 Session Token** | 没有标准化，无法被 AI 工具链理解。用 JWT + OAuth 替代 |
+
+#### 总结：推荐技术栈
+
+```
+┌─────────────────────────────────────────────┐
+│           能力模型（Capability-based）          │  ← 核心：替代 RBAC
+├─────────────────────────────────────────────┤
+│  人类入口           │  AI 入口               │
+│  Passkeys           │  Delegation Token     │  ← 两条路径
+│  (WebAuthn)         │  (AAP / JWT)          │
+├─────────────────────┴───────────────────────┤
+│              OAuth 2.1 + OIDC                │  ← 统一 Token 基础设施
+├─────────────────────────────────────────────┤
+│  Channel Confirm    │  MCP Auth             │  ← 交互层
+│  (vue-mind)         │  (工具生态)            │
+└─────────────────────────────────────────────┘
+```
+
+**一句话**：用 Passkeys 让人登录，用 OAuth 2.1 管 Token，用能力模型控权限，用委托令牌授权 AI，用 Channel 确认敏感操作。
+
 ---
 
 ## npm 发布

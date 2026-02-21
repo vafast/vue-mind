@@ -495,211 +495,222 @@ function VideoPlayer({ src, autoplay, onPlay, volume, onVolumeChange }: Props) {
 | 接入成本 | 中 | 中 | 高（每站一套） | **低（两行代码）** |
 | 性能 | 中（跨进程） | 低（每步 LLM） | 高 | **高（同进程直调）** |
 
-## AI 时代的登录问题
+## AI 时代的认证：从根本上重新设计
 
-### 问题：认证链路是断裂的
+### 错误的前提：操作者一定是人
 
-这是 AI Agent 操作 Web 应用最大的基础设施缺口。
+当前所有 Web 应用的认证模型都建立在一个假设上：**坐在屏幕前操作的是人类**。
 
-```
-人类 ──→ 浏览器（Cookie/Session）──→ 网站 ──→ 正常使用     ✓
-AI   ──→ 注入 JS / HTTP 请求    ──→ 网站 ──→ 你谁？请登录   ✗
-```
+登录流程验证的是"你是人"——扫码、输密码、按指纹、拖滑块、识别红绿灯图片。
 
-讽刺的是：**用户在自己电脑上已经登录了所有服务**。Safari 里有 B 站的 Cookie，Chrome 里有腾讯的 Session，Keychain 里存着所有密码。但 AI Agent 却用不了这些——它被当作一个"陌生访客"。
-
-### 实际遇到的问题
-
-我们在构建视频网站 AI 工具时踩了个遍：
-
-| 场景 | 问题 |
-|---|---|
-| B 站画质 | 未登录只能 480p，登录后 1080p，大会员 4K |
-| 腾讯视频 | 未登录无法播放会员内容，VIP 等级决定画质上限 |
-| 会员检测 | B 站靠 Cookie `SESSDATA`，腾讯靠 `vqq_vusession`，完全不同的字段和逻辑 |
-| Session 过期 | Cookie 随时可能失效，AI 操作到一半突然变成未登录状态 |
-| 登录流程 | 每个网站登录 UI 不同（扫码/密码/手机号/OAuth），AI 很难自动完成 |
-
-### 三层解法
-
-#### 第一层：复用浏览器已有登录态（立即可用）
-
-最务实的方案：用户已经在浏览器里登录了，AI 直接借用。
+这个假设在 AI 时代是错误的。
 
 ```
-用户的 Safari/Chrome
-    │
+2020 年：  人 → 浏览器 → 网站         （操作者 = 人）
+2026 年：  人 → AI → 浏览器 → 网站    （操作者 = AI，授权者 = 人）
+未来：     人 → AI → 多个应用/服务     （AI 是人的常驻代理）
+```
+
+问题不是"AI 怎么登录"，而是 **"认证系统怎么认可 AI 是人的合法代理"**。
+
+### 这不是一个工具问题，是一个设计范式问题
+
+看几个真实例子：
+
+| 场景 | 为人设计 | AI 遇到的困境 |
+|---|---|---|
+| B 站看视频 | 扫码登录，Cookie 保持 | AI 没有手机扫码，Cookie 随时过期 |
+| 腾讯视频 | 微信 OAuth 弹窗 | AI 无法操作微信弹窗 |
+| npm 发包 | 打开 Chrome → WebAuthn → 按指纹 | AI 没有指纹，CI 没有浏览器 |
+| GitHub API | Personal Access Token | 需要人手动创建和管理 |
+| 银行转账 | 短信验证码 + 人脸识别 | 这**应该**拦住 AI |
+
+最后一行很关键：不是所有操作都应该让 AI 做。认证的核心问题变成了 **分级授权**。
+
+### 未来应用开发的认证模型：四级能力授权
+
+传统认证是二元的：登录 / 未登录。AI 时代需要的是 **连续的能力光谱**：
+
+```
+Level 0 ─ 公开                 任何人/AI 都能做
+    │     浏览内容、搜索、查看公开信息
     ▼
-Cookie 提取 ──→ AI Agent 带着 Cookie 发请求
-    │
-    ├── Safari: ~/Library/Cookies/Cookies.binarycookies
-    ├── Chrome: ~/Library/Application Support/Google/Chrome/Default/Cookies (SQLite + 加密)
-    └── macOS Keychain: security find-internet-password
+Level 1 ─ 委托可执行           人授权一次，AI 长期代理
+    │     播放视频、发评论、管理待办、发布代码包
+    ▼
+Level 2 ─ 实时确认             每次都需要人确认
+    │     删除数据、修改设置、取消订阅
+    ▼
+Level 3 ─ 仅限人类             AI 永远不能代理
+          支付转账、修改密码、人脸核身、签署合同
 ```
 
-现有工具：
-- **@mherod/get-cookie** — Node.js 库，从 Chrome/Firefox/Safari 的数据库直接提取 Cookie，自动处理加密
-- **Electron `session.cookies`** — Electron 应用可直接访问自己的 Cookie Store
-- **AgentAuth** — 开源 AI Agent 认证库，加密存储 Cookie，按需分发给 Agent
-
-**我们在 B 站和腾讯视频工具中已经用了这种方式**：通过 Safari 的 `runJavaScript` 在已登录的页面上下文中执行操作，自动继承用户的 Cookie。
-
-适用场景：自己电脑上的 AI 助手，用户知道且授权 AI 使用自己的登录态。
-
-#### 第二层：标准化的 Agent 授权协议（正在成熟）
-
-IETF 和社区正在建立 AI Agent 专用的认证标准：
-
-**AAP（Agent Authorization Profile）— IETF 2026 年 2 月草案**
-
-扩展 OAuth 2.0，为 AI Agent 设计了结构化 JWT Claims：
-
-```json
-{
-  "agent_id": "vue-mind-agent-001",
-  "agent_type": "llm",
-  "operator": "user@example.com",
-  "capabilities": {
-    "actions": ["read:video", "control:playback"],
-    "constraints": {
-      "domains": ["bilibili.com", "v.qq.com"],
-      "rate_limit": "100/hour",
-      "time_window": "2026-02-15T00:00:00Z/2026-02-16T00:00:00Z"
-    }
-  },
-  "task_id": "watch-swallowed-star-latest",
-  "purpose": "播放吞噬星空最新一集",
-  "oversight": "human-in-the-loop"
-}
-```
-
-核心特性：
-- **Agent 身份标识** — AI 有自己的 ID 和类型（LLM/bot/scripted）
-- **能力约束** — 精确到域名、操作、频率限制，不是模糊的 `read:web`
-- **任务绑定** — Token 和具体任务关联，防止"目的漂移"
-- **委托追踪** — 多层 Agent 链路中，每一层的授权都可追溯
-- **人类监督** — 可声明需要 human-in-the-loop
-
-**MCP Auth — 基于 OAuth 2.1**
-
-Model Context Protocol 已经定义了认证规范：
-- 服务端返回 `401` + Protected Resource Metadata
-- 客户端走 OAuth 2.1 授权码流程
-- 支持 Authorization Code（代表用户）和 Client Credentials（应用级）
-
-**Transaction Tokens for Agents — IETF 草案**
-
-为多 Agent 协作设计的令牌传递方案：
-- `actor` 字段标识当前 Agent
-- `principal` 字段标识最终授权人（人类用户）
-- 在 Agent 链路中逐层传递，每层可审计
-
-#### 第三层：框架原生认证感知（vue-mind 方向）
-
-这是我们要做的：**让组件声明自己的认证需求，AI 自动感知**。
+#### 开发者视角：在组件级别声明
 
 ```vue
 <script setup>
-import { defineAIAction } from '@vue-mind/runtime'
+import { defineAIAction, createDeferredPromise } from '@vue-mind/runtime'
 
+// Level 0 — 公开，AI 随时可调用
+defineAIAction('search', {
+  description: '搜索视频',
+  authLevel: 'public',
+  async handler(params) {
+    return await searchVideos(params.keyword)
+  },
+})
+
+// Level 1 — 委托可执行，需要用户提前授权，之后 AI 自主调用
 defineAIAction('playVideo', {
-  description: '播放视频',
-  // 声明这个 action 需要的认证级别
-  auth: {
-    required: true,
-    level: 'vip',           // 需要会员
-    provider: 'tencent',    // 腾讯账号体系
-    fallback: '未登录只能播放 480p 预览',
+  description: '播放视频（需登录，会员可看高清）',
+  authLevel: 'delegated',
+  authHint: {
+    minRole: 'authenticated',        // 最低需要登录
+    optimalRole: 'vip',              // 最佳体验需要会员
+    degradedExperience: '未登录只能 480p，非会员最高 1080p',
   },
   async handler(params) { ... },
+})
+
+// Level 2 — 每次确认，AI 调用时会弹确认框等用户操作
+defineAIAction('deletePlaylist', {
+  description: '删除播放列表',
+  authLevel: 'confirm',
+  async handler(params) {
+    const deferred = createDeferredPromise()
+    showConfirmDialog(`确定删除「${params.name}」？`)
+    const confirmed = await deferred.promise     // 等用户点击
+    if (!confirmed) throw new Error('用户取消')
+    return await deletePlaylist(params.id)
+  },
+})
+
+// Level 3 — 仅限人类，AI 不能调用，只能告诉用户"请自己操作"
+defineAIAction('bindPayment', {
+  description: '绑定支付方式',
+  authLevel: 'human-only',
+  async handler() {
+    throw new Error('此操作需要您亲自完成')
+  },
 })
 </script>
 ```
 
-AI 在调用前就知道：
-- 这个操作需要登录
-- 需要什么级别的权限
-- 没权限会怎样
-- 应该怎么引导用户
-
-**页面快照中包含认证状态**：
+#### AI 视角：快照中的完整能力图
 
 ```javascript
 __AI_MIND__.snapshot()
 // {
 //   auth: {
-//     logged: true,
-//     provider: 'tencent',
-//     level: 'vip',
-//     expiresAt: '2026-03-01T00:00:00Z',
-//   },
-//   components: [
-//     {
-//       name: 'VideoPlayer',
-//       actions: [{
-//         name: 'playVideo',
-//         auth: { required: true, level: 'vip', satisfied: true }
-//       }, {
-//         name: 'play4K',
-//         auth: { required: true, level: 'svip', satisfied: false }
-//       }]
+//     identity: 'user@example.com',
+//     currentRole: 'vip',
+//     delegation: {
+//       scope: ['public', 'delegated'],
+//       expiresAt: '2026-03-01T00:00:00Z',
+//       grantedVia: 'browser-session',
 //     }
+//   },
+//   capabilities: [
+//     { action: 'search',         level: 'public',     allowed: true },
+//     { action: 'playVideo',      level: 'delegated',  allowed: true, quality: '4K' },
+//     { action: 'deletePlaylist', level: 'confirm',    allowed: true, needsConfirm: true },
+//     { action: 'bindPayment',    level: 'human-only', allowed: false, reason: '需要用户亲自操作' },
 //   ]
 // }
 ```
 
-AI 看到快照就知道：当前是 VIP 登录态，可以播放高清，但 4K 需要 SVIP 升级。
+AI 看到这个快照就完全清楚：
+- 我能搜索、能播放 4K（因为是 VIP）
+- 删除播放列表需要弹框让用户确认
+- 绑定支付我做不了，告诉用户自己去操作
 
-### 最佳实践建议
+### 认证的获取：委托而不是登录
 
-| 场景 | 推荐方案 |
+关键设计：**AI 不需要"登录"，需要的是"委托"**。
+
+```
+传统模型：  AI 拿着用户名密码去登录 ── 危险、不可控
+
+委托模型：  人类登录 → 生成委托令牌 → AI 携带令牌操作
+            │
+            ├── 范围受限：只能做被授权的事
+            ├── 时间受限：令牌会过期
+            ├── 可撤销：人随时可以收回
+            └── 可审计：每个操作都有记录
+```
+
+#### 在自己电脑上（最常见场景）
+
+用户已经在浏览器里登录了。最自然的委托方式：**AI 使用用户已有的浏览器会话**。
+
+这不是"偷 Cookie"，是**用户主动授权 AI 使用自己的会话**——和你允许一个 App 访问你的浏览器书签一样自然。
+
+```
+用户在 Safari 中已登录 B 站
+    │
+    ▼
+vue-mind 运行时检测到登录态 ──→ 快照包含 auth 信息
+    │
+    ▼
+AI 在已认证的页面上下文中操作 ──→ 天然继承用户身份
+    │
+    ▼
+等价于用户亲自在页面上点击 ──→ 体验一致，安全可控
+```
+
+#### 跨应用/跨服务（标准化方向）
+
+IETF 正在推的两个标准正是这个思路：
+
+**AAP（Agent Authorization Profile）— 2026 年 2 月草案**
+
+基于 OAuth 2.0 扩展，核心概念是**结构化委托**：
+
+```json
+{
+  "agent_id": "vue-mind-agent",
+  "agent_type": "llm",
+  "principal": "user@example.com",
+  "capabilities": ["read:video", "control:playback"],
+  "constraints": { "domains": ["bilibili.com"], "rate_limit": "100/hour" },
+  "task_id": "watch-video-001",
+  "oversight": "human-in-the-loop"
+}
+```
+
+**Transaction Tokens — 多 Agent 链路**
+
+当 AI Agent A 调用 AI Agent B 时，委托链可追溯：
+
+```
+人 → Agent A (token: 人授权A) → Agent B (token: 人授权A→A委托B) → 服务
+                                                                   │
+                                               服务看到完整链路：谁发起、谁执行、授权范围
+```
+
+### 对应用开发者的建议
+
+如果你现在要开发一个 AI 时代的 Web 应用：
+
+| 原则 | 做法 |
 |---|---|
-| **个人电脑 AI 助手** | 第一层：复用浏览器 Cookie，零额外登录 |
-| **AI SaaS 代理操作** | 第二层：AAP / MCP Auth，标准化授权 |
-| **AI-native 应用开发** | 第三层：框架内声明 auth，AI 感知 + 自动引导 |
-| **多 Agent 协作** | Transaction Tokens，链路可追溯 |
+| **操作分级** | 每个 API / 组件动作声明 authLevel（public → delegated → confirm → human-only） |
+| **支持委托身份** | 认证系统除了认"人"，也认"AI 代表人"。JWT 中加 `actor` 和 `principal` 字段 |
+| **Session 可共享** | 浏览器已登录的 Session 可以被同设备的 AI 使用（用户授权后） |
+| **降级而非拒绝** | 没有 VIP 不是"禁止访问"，而是"可以看 480p"。告诉 AI 降级体验是什么 |
+| **确认走 Channel** | 需要人确认的操作，通过 vue-mind Channel 弹框等 Promise resolve，不要用 CAPTCHA |
+| **审计链路** | 记录每个操作是人做的还是 AI 做的，用什么委托令牌，做了什么 |
 
-### 关键原则
+### 核心原则
 
-> **AI 不应该需要自己"登录"。在用户的设备上，AI 是用户的代理，应该继承用户的信任和权限。**
-
-这和人使用电脑是一致的：你不会因为打开了一个新的 Tab 就需要重新登录。AI 作为用户的延伸，也不应该。
-
-### 附：npm 发布认证也是这个问题
-
-npm 现在发布包的流程：
+> **AI 不是一个需要"登录"的新用户，它是已登录用户的延伸。认证系统应该识别委托关系，而不是要求 AI 证明自己是人。**
 
 ```
-npm publish
-    → 打开 Chrome 浏览器
-    → 跳转 npmjs.com 登录页
-    → WebAuthn 弹窗
-    → Touch ID 按指纹
-    → 回调确认
-    → 才能发布
+错误思路：AI 怎么通过验证码？AI 怎么按指纹？AI 怎么扫码？
+正确思路：人已经验证过了，怎么安全地让 AI 代理人操作？
 ```
 
-这个流程完全为人类设计：浏览器 + 生物识别。AI Agent 或 CI 环境根本无法完成。
-
-**解法：npm Automation Token**
-
-npm 支持创建不需要 2FA 的 Automation Token，专为 CI/CD 和脚本使用：
-
-```bash
-# 方式一：网页创建（需登录一次）
-# npmjs.com → Access Tokens → Generate New Token → Automation
-
-# 方式二：CLI 创建
-npm token create --type=automation
-
-# 配置到环境变量
-echo "//registry.npmjs.org/:_authToken=npm_xxxx" > ~/.npmrc
-
-# 之后 publish 不再弹浏览器
-pnpm publish:all
-```
-
-这其实就是上面"第二层"思路的实践：**用长效 Token 替代交互式认证，让非人类 Actor（AI/CI）也能操作**。
+这是 Web 认证从"证明你是人"到"证明你被人授权"的范式转移。
 
 ---
 

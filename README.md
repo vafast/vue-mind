@@ -1565,7 +1565,7 @@ export const auth = betterAuth({
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │ Level 0 — Electron IPC（Agent 和应用在同一进程）                 │
-│ 适用：Agent 就是你的 Electron 应用的一部分（如 smart-finder）     │
+│ 适用：Agent 就是你的 Electron 应用的一部分（如 superx）     │
 │ 认证：无需。同进程 = 完全信任                                    │
 │ 复杂度：零                                                      │
 ├────────────────────────────────────────────────────────────────┤
@@ -1585,11 +1585,11 @@ export const auth = betterAuth({
 
 #### Level 0：Electron IPC（零认证）
 
-你的 `smart-finder` 已经在用这个模式：
+你的 `superx` 已经在用这个模式：
 
 ```
 ┌───────────────────────────────────────┐
-│  smart-finder (Electron)              │
+│  superx (Electron)              │
 │                                       │
 │  ┌──────────┐     ┌──────────────┐   │
 │  │ 渲染进程   │ IPC │ 主进程        │   │
@@ -1914,7 +1914,7 @@ const channel = createAIChannel()
 
 #### 和"纯 Electron 本地应用"的区别
 
-| | 纯本地（smart-finder 模式） | 公网部署 + Electron 客户端 |
+| | 纯本地（superx 模式） | 公网部署 + Electron 客户端 |
 |---|---|---|
 | 服务端 | 无（逻辑全在本地） | 有（API + 数据库 + 认证） |
 | 认证 | IPC，零认证 | Better Auth（Passkey + Token） |
@@ -1923,7 +1923,7 @@ const channel = createAIChannel()
 | Channel | 进程内直通 | WSS 公网连接（Token 验证） |
 | 适用场景 | 个人工具 | 多用户产品 |
 
-smart-finder 这种纯本地应用，IPC 零认证没问题。但只要有公网服务端，Better Auth + Token 就是第一天的事。
+superx 这种纯本地应用，IPC 零认证没问题。但只要有公网服务端，Better Auth + Token 就是第一天的事。
 
 #### 实施优先级（修正版）
 
@@ -1938,7 +1938,7 @@ smart-finder 这种纯本地应用，IPC 零认证没问题。但只要有公网
 
 ### 问题 B：操控第三方网站 — 通用浏览器桥接
 
-`smart-finder` 现有的 Safari WebDriver + AppleScript 方案有一个硬伤：**只能在 macOS + Safari 上用**。换 Chrome 不行，换 Windows 不行，换手机更不行。
+`superx` 现有的 Safari WebDriver + AppleScript 方案有一个硬伤：**只能在 macOS + Safari 上用**。换 Chrome 不行，换 Windows 不行，换手机更不行。
 
 这不是一个可以忽略的问题——用户可能用 Chrome、Arc、Edge，你的 Agent 不能绑死在一个浏览器上。
 
@@ -2135,7 +2135,7 @@ CDP 连接 Chrome          浏览器扩展                 WebDriver BiDi
 成本：1-2 天              成本：1-2 周                 成本：等标准落地
 ```
 
-#### smart-finder 的迁移路径
+#### superx 的迁移路径
 
 现有 `safariManager.ts` 的架构可以抽象为一个通用接口，然后按浏览器选择不同后端：
 
